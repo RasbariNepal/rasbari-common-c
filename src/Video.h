@@ -55,6 +55,7 @@ typedef struct _SS_PING {
 
 // Fields are big-endian
 #define SS_FRAME_FEC_PTYPE 0x5502
+#define SS_CLIENT_TELEMETRY_PTYPE 0x5510
 typedef struct _SS_FRAME_FEC_STATUS {
     uint32_t frameIndex;
     uint16_t highestReceivedSequenceNumber;

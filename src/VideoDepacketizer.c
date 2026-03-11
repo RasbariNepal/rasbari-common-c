@@ -25,6 +25,12 @@ static uint32_t firstPacketRtpTimestamp;
 static bool dropStatePending;
 static bool idrFrameProcessed;
 
+// FEC metadata bridge — set by RtpVideoQueue.c before submitCompletedFrame()
+static uint16_t pendingFecReceived;
+static uint16_t pendingFecExpected;
+static uint16_t pendingFecRecovered;
+static uint8_t  pendingFecFailure;
+
 #define DR_CLEANUP -1000
 
 #define CONSECUTIVE_DROP_LIMIT 120
@@ -76,8 +82,20 @@ void initializeVideoDepacketizer(int pktSize) {
     firstPacketRtpTimestamp = 0;
     lastPacketPayloadLength = 0;
     dropStatePending = false;
+    pendingFecReceived = 0;
+    pendingFecExpected = 0;
+    pendingFecRecovered = 0;
+    pendingFecFailure = 0;
     idrFrameProcessed = false;
     strictIdrFrameWait = !isReferenceFrameInvalidationEnabled();
+}
+
+// Called by RtpVideoQueue.c before submitCompletedFrame() to bridge FEC metadata
+void setFrameFecMetadata(uint16_t received, uint16_t expected, uint16_t fecRecovered, uint8_t fecFailure) {
+    pendingFecReceived = received;
+    pendingFecExpected = expected;
+    pendingFecRecovered = fecRecovered;
+    pendingFecFailure = fecFailure;
 }
 
 // Free the NAL chain
@@ -496,6 +514,12 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
             // If we start sending this state in the frame header, we can make it 100% accurate.
             qdu->decodeUnit.hdrActive = LiGetCurrentHostDisplayHdrMode();
             qdu->decodeUnit.colorspace = (uint8_t)(qdu->decodeUnit.hdrActive ? COLORSPACE_REC_2020 : StreamConfig.colorSpace);
+
+            // Populate FEC metadata from RtpVideoQueue bridge
+            qdu->decodeUnit.packetsReceived = pendingFecReceived;
+            qdu->decodeUnit.packetsExpected = pendingFecExpected;
+            qdu->decodeUnit.packetsFecRecovered = pendingFecRecovered;
+            qdu->decodeUnit.fecFailure = pendingFecFailure;
 
             // Invoke the key frame callback if needed
             if (nalChainHead->bufferType != BUFFER_TYPE_PICDATA || qdu->decodeUnit.frameType == FRAME_TYPE_IDR) {

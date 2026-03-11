@@ -1487,6 +1487,87 @@ static void lossStatsThreadFunc(void* context) {
     }
 }
 
+// Send extended IDX_LOSS_STATS with ABR extension appended.
+// Caller builds the full payload (32 legacy + 25 ABR extension = 57 bytes).
+int LiSendLossStatsWithAbr(const void* payload, int length) {
+    if (peer == NULL) {
+        return -1;
+    }
+    return sendMessageEnet(packetTypes[IDX_LOSS_STATS], (short)length, payload,
+                           CTRL_CHANNEL_GENERIC, ENET_PACKET_FLAG_UNSEQUENCED, false) ? 0 : -1;
+}
+
+// Send a telemetry batch packet. Uses dynamic allocation for the plaintext
+// buffer since batch packets can exceed the 256-byte tempBuffer in sendMessageEnet.
+int LiSendTelemetryBatch(const void* payload, int length) {
+    if (peer == NULL) {
+        return -1;
+    }
+
+    // For batch packets we call sendMessageEnet which will handle the encryption.
+    // The tempBuffer[256] in sendMessageEnet will assert if sizeof(header) + payload > 256.
+    // For batches up to ~240 bytes this is fine. For larger ones, we need a workaround.
+    // Since our batches can be ~5KB, we construct and send the ENet packet directly.
+    if (encryptedControlStream) {
+        ENetPacket* enetPacket;
+        PNVCTL_ENCRYPTED_PACKET_HEADER encPacket;
+        PNVCTL_ENET_PACKET_HEADER_V2 packet;
+        char* plaintext;
+
+        // Allocate plaintext buffer for encryption
+        plaintext = (char*)malloc(sizeof(*packet) + length);
+        if (plaintext == NULL) {
+            return -1;
+        }
+
+        enetPacket = enet_packet_create(NULL,
+                                        sizeof(*encPacket) + AES_GCM_TAG_LENGTH + sizeof(*packet) + length,
+                                        ENET_PACKET_FLAG_UNSEQUENCED);
+        if (enetPacket == NULL) {
+            free(plaintext);
+            return -1;
+        }
+
+        PltLockMutex(&enetMutex);
+
+        encPacket = (PNVCTL_ENCRYPTED_PACKET_HEADER)enetPacket->data;
+        encPacket->encryptedHeaderType = 0x0001;
+        encPacket->length = sizeof(encPacket->seq) + AES_GCM_TAG_LENGTH + sizeof(*packet) + length;
+        encPacket->seq = currentEnetSequenceNumber++;
+
+        packet = (PNVCTL_ENET_PACKET_HEADER_V2)plaintext;
+        packet->type = SS_CLIENT_TELEMETRY_PTYPE;
+        packet->payloadLength = (short)length;
+        memcpy(&packet[1], payload, length);
+
+        if (!encryptControlMessage(encPacket, packet)) {
+            Limelog("Failed to encrypt telemetry batch\n");
+            enet_packet_destroy(enetPacket);
+            PltUnlockMutex(&enetMutex);
+            free(plaintext);
+            return -1;
+        }
+
+        if (enet_peer_send(peer, CTRL_CHANNEL_GENERIC, enetPacket) < 0) {
+            enet_packet_destroy(enetPacket);
+            PltUnlockMutex(&enetMutex);
+            free(plaintext);
+            return -1;
+        }
+
+        enet_host_service(client, NULL, 0);
+        PltUnlockMutex(&enetMutex);
+        free(plaintext);
+        return 0;
+    }
+    else {
+        // Unencrypted path — safe to use sendMessageEnet for any size
+        // since it allocates the ENet packet dynamically
+        return sendMessageEnet(SS_CLIENT_TELEMETRY_PTYPE, (short)length, payload,
+                               CTRL_CHANNEL_GENERIC, ENET_PACKET_FLAG_UNSEQUENCED, false) ? 0 : -1;
+    }
+}
+
 static void requestIdrFrame(void) {
     // If this server does not have a known IDR frame request
     // message, we'll accomplish the same thing by creating a

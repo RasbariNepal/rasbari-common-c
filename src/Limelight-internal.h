@@ -87,6 +87,10 @@ extern uint32_t EncryptionFeaturesEnabled;
 // Client feature flags for x-ml-general.featureFlags SDP attribute
 #define ML_FF_FEC_STATUS 0x01 // Client sends SS_FRAME_FEC_STATUS for frame losses
 #define ML_FF_SESSION_ID_V1 0x02 // Client supports X-SS-Ping-Payload and X-SS-Connect-Data
+#define ML_FF_CLIENT_TELEMETRY_V2 0x04 // Client supports per-frame telemetry V2
+
+// Sunshine server feature flags
+#define SS_FF_CLIENT_TELEMETRY_V2 0x04 // Server supports client telemetry V2
 
 #define UDP_RECV_POLL_TIMEOUT_MS 100
 
@@ -131,6 +135,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo);
 void initializeVideoDepacketizer(int pktSize);
 void destroyVideoDepacketizer(void);
 void queueRtpPacket(PRTPV_QUEUE_ENTRY queueEntry);
+void setFrameFecMetadata(uint16_t received, uint16_t expected, uint16_t fecRecovered, uint8_t fecFailure);
 void stopVideoDepacketizer(void);
 void requestDecoderRefresh(void);
 void notifyFrameLost(unsigned int frameNumber, bool speculative);

@@ -785,6 +785,19 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
                 queue->multiFecCurrentBlockNumber++;
             }
             else {
+                // Bridge FEC metadata to VideoDepacketizer before submission.
+                // For multi-FEC-block frames, this captures the last block's stats.
+                {
+                    uint16_t fecRecovered = (queue->bufferDataPackets > queue->receivedDataPackets) ?
+                        (queue->bufferDataPackets - queue->receivedDataPackets) : 0;
+                    setFrameFecMetadata(
+                        queue->receivedDataPackets,
+                        queue->bufferDataPackets,
+                        fecRecovered,
+                        0 // fecFailure = 0 since frame was successfully reconstructed
+                    );
+                }
+
                 // Submit all FEC blocks to the depacketizer
                 submitCompletedFrame(queue);
 

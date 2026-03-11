@@ -191,6 +191,12 @@ typedef struct _DECODE_UNIT {
     // Note: This is not currently parsed from the actual bitstream, so if your
     // client has access to a bitstream parser, prefer that over this field.
     uint8_t colorspace;
+
+    // FEC metadata for this frame (populated from RTP video queue state)
+    uint16_t packetsReceived;       // data packets received for this frame
+    uint16_t packetsExpected;       // total data packets expected
+    uint16_t packetsFecRecovered;   // data packets recovered via FEC
+    uint8_t  fecFailure;            // 1 if FEC couldn't recover all lost packets
 } DECODE_UNIT, *PDECODE_UNIT;
 
 // Specifies that the audio stream should be encoded in stereo (default)
@@ -1003,6 +1009,20 @@ void LiRequestIdrFrame(void);
 #define LI_FF_PEN_TOUCH_EVENTS        0x01 // LiSendTouchEvent()/LiSendPenEvent() supported
 #define LI_FF_CONTROLLER_TOUCH_EVENTS 0x02 // LiSendControllerTouchEvent() supported
 uint32_t LiGetHostFeatureFlags(void);
+
+// Returns true if connected to a Sunshine server.
+bool LiIsSunshine(void);
+
+// Send extended IDX_LOSS_STATS with ABR data appended after the legacy 32-byte payload.
+// payload must contain the full packet (32 legacy + ABR extension).
+int LiSendLossStatsWithAbr(const void* payload, int length);
+
+// Send a telemetry batch packet (SS_CLIENT_TELEMETRY_PTYPE).
+// payload contains batch header + wire records.
+int LiSendTelemetryBatch(const void* payload, int length);
+
+// Returns the RTSP session ID string for session correlation.
+const char* LiGetSessionId(void);
 
 #ifdef __cplusplus
 }

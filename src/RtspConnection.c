@@ -1405,3 +1405,7 @@ Exit:
 
     return ret;
 }
+
+const char* LiGetSessionId(void) {
+    return sessionIdString;
+}
