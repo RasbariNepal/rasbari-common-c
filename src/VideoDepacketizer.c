@@ -562,8 +562,8 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
                 LiCompleteVideoFrame(qdu, VideoCallbacks.submitDecodeUnit(&qdu->decodeUnit));
             }
 
-            // Notify the control connection
-            connectionReceivedCompleteFrame(frameNumber, frameIsLTR);
+            // Notify the control connection (pass receive time for RTT measurement)
+            connectionReceivedCompleteFrame(frameNumber, frameIsLTR, firstPacketReceiveTimeUs);
 
             // Clear frame drops
             consecutiveFrameDrops = 0;

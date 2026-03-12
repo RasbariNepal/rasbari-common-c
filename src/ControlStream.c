@@ -100,6 +100,7 @@ static PLT_THREAD requestIdrFrameThread;
 static PLT_THREAD controlReceiveThread;
 static PLT_THREAD asyncCallbackThread;
 static uint32_t lastGoodFrame;
+static uint64_t lastGoodFrameRecvTimeUs;
 static uint32_t lastSeenFrame;
 static bool stopping;
 static bool disconnectPending;
@@ -347,6 +348,7 @@ int initializeControlStream(void) {
     }
 
     lastGoodFrame = 0;
+    lastGoodFrameRecvTimeUs = 0;
     lastSeenFrame = 0;
     disconnectPending = false;
     intervalGoodFrameCount = 0;
@@ -434,8 +436,9 @@ void connectionDetectedFrameLoss(uint32_t startFrame, uint32_t endFrame) {
 
 // When we receive a frame, update the number of our current frame
 // and send ACK control message if the frame is LTR
-void connectionReceivedCompleteFrame(uint32_t frameIndex, bool frameIsLTR) {
+void connectionReceivedCompleteFrame(uint32_t frameIndex, bool frameIsLTR, uint64_t recvTimeUs) {
     lastGoodFrame = frameIndex;
+    lastGoodFrameRecvTimeUs = recvTimeUs;
     intervalGoodFrameCount++;
 
     if (frameIsLTR && IS_SUNSHINE() && isReferenceFrameInvalidationEnabled()) {
@@ -1430,12 +1433,13 @@ static void lossStatsThreadFunc(void* context) {
                     free(queuedFrameStatus);
                 }
 
-                // Send extended loss stats to Sunshine (68-byte IDX_LOSS_STATS).
+                // Send extended loss stats to Sunshine (70-byte IDX_LOSS_STATS).
                 // Bytes 0–31 are byte-for-byte identical to the legacy format so existing
                 // parsers reading stats[0], stats[1], stats[3] are unaffected.
-                // The new fields in bytes 32–67 carry the full stream stat snapshot.
+                // Bytes 32–67 carry the full stream stat snapshot.
+                // Bytes 68–69 carry recv_to_feedback_ms for frame echo RTT compensation.
                 {
-                    char lossStatsPayload[68];
+                    char lossStatsPayload[70];
                     BYTE_BUFFER lsBuf;
 
                     uint32_t rttMs = 0, rttVarianceMs = 0;
@@ -1445,6 +1449,20 @@ static void lossStatsThreadFunc(void* context) {
 
                     STREAM_STAT_SNAPSHOT snap = {0};
                     streamStatsGetSnapshot(&snap);
+
+                    // Compute time since we received the frame we're reporting as lastGoodFrame.
+                    // This lets the server subtract client-side polling delay from frame echo RTT.
+                    uint16_t recvToFeedbackMs = 0;
+                    {
+                        uint64_t recvTime = lastGoodFrameRecvTimeUs;
+                        if (recvTime > 0) {
+                            uint64_t nowUs = PltGetMicroseconds();
+                            if (nowUs > recvTime) {
+                                uint64_t elapsedMs = (nowUs - recvTime) / 1000;
+                                recvToFeedbackMs = (uint16_t)(elapsedMs < UINT16_MAX ? elapsedMs : UINT16_MAX);
+                            }
+                        }
+                    }
 
                     BbInitializeWrappedBuffer(&lsBuf, lossStatsPayload, 0, sizeof(lossStatsPayload), BYTE_ORDER_LITTLE);
 
@@ -1467,6 +1485,9 @@ static void lossStatsThreadFunc(void* context) {
                     BbPut32(&lsBuf, snap.intervalFrames);        // stats[14]
                     BbPut32(&lsBuf, snap.intervalDataPkts);      // stats[15]
                     BbPut32(&lsBuf, snap.intervalLostPkts);      // stats[16]
+
+                    // ---- Frame echo RTT compensation: bytes 68–69 ----
+                    BbPut16(&lsBuf, recvToFeedbackMs);
 
                     if (!sendMessageAndForget(packetTypes[IDX_LOSS_STATS],
                                               sizeof(lossStatsPayload),
