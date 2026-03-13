@@ -43,6 +43,7 @@ extern SS_PING VideoPingPayload;
 extern uint32_t ControlConnectData;
 
 extern uint32_t SunshineFeatureFlags;
+extern uint32_t AbrFeedbackInterval;
 
 // Encryption flags shared by Sunshine and Moonlight in RTSP
 #define SS_ENC_CONTROL_V2 0x01
@@ -88,9 +89,13 @@ extern uint32_t EncryptionFeaturesEnabled;
 #define ML_FF_FEC_STATUS 0x01 // Client sends SS_FRAME_FEC_STATUS for frame losses
 #define ML_FF_SESSION_ID_V1 0x02 // Client supports X-SS-Ping-Payload and X-SS-Connect-Data
 #define ML_FF_CLIENT_TELEMETRY_V2 0x04 // Client supports per-frame telemetry V2
+#define ML_FF_CLIPBOARD 0x08 // Client supports bidirectional clipboard sharing
+#define ML_FF_UNRELIABLE_INPUT 0x10 // Client supports unreliable sequenced input for motion
 
 // Sunshine server feature flags
 #define SS_FF_CLIENT_TELEMETRY_V2 0x04 // Server supports client telemetry V2
+// SS_FF_CLIPBOARD is defined in Limelight.h (public, needed by app layer)
+#define SS_FF_UNRELIABLE_INPUT 0x10 // Server supports unreliable sequenced input for motion
 
 #define UDP_RECV_POLL_TIMEOUT_MS 100
 
@@ -135,7 +140,8 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo);
 void initializeVideoDepacketizer(int pktSize);
 void destroyVideoDepacketizer(void);
 void queueRtpPacket(PRTPV_QUEUE_ENTRY queueEntry);
-void setFrameFecMetadata(uint16_t received, uint16_t expected, uint16_t fecRecovered, uint8_t fecFailure);
+void setFrameFecMetadata(uint16_t received, uint16_t expected, uint16_t fecRecovered, uint8_t fecFailure,
+                         uint64_t lastRecvTimeUs, uint64_t lossBitmap);
 void stopVideoDepacketizer(void);
 void requestDecoderRefresh(void);
 void notifyFrameLost(unsigned int frameNumber, bool speculative);

@@ -72,6 +72,9 @@ typedef struct _PACKET_HOLDER {
         SS_CONTROLLER_TOUCH_PACKET controllerTouch;
         SS_CONTROLLER_MOTION_PACKET controllerMotion;
         SS_CONTROLLER_BATTERY_PACKET controllerBattery;
+        SS_REL_MOUSE_MOVE_PACKET ssMouseMoveRel;
+        SS_MOUSE_EPOCH_RESET_PACKET ssMouseEpochReset;
+        SS_MULTI_CONTROLLER_PACKET ssMultiController;
         NV_UNICODE_PACKET unicode;
     } packet;
 } PACKET_HOLDER, *PPACKET_HOLDER;
@@ -91,6 +94,20 @@ static struct {
     int width, height;
     bool dirty; // Update ready to send (queued packet holder in packetQueue)
 } currentAbsoluteMouseState;
+
+// Unreliable input: cumulative mouse delta tracking
+static int32_t cumulativeDeltaX;
+static int32_t cumulativeDeltaY;
+static uint16_t mouseMotionSeq;
+static uint16_t mouseEpochNumber;
+
+// Unreliable input: per-controller gamepad sequence tracking
+static uint16_t gamepadSeq[MAX_GAMEPADS];
+
+// Helper: check if unreliable input mode is negotiated
+static bool unreliableInputEnabled(void) {
+    return IS_SUNSHINE() && (SunshineFeatureFlags & SS_FF_UNRELIABLE_INPUT) != 0;
+}
 
 // Initializes the input stream
 int initializeInputStream(void) {
@@ -121,6 +138,14 @@ int initializeInputStream(void) {
     memset(currentGamepadSensorState, 0, sizeof(currentGamepadSensorState));
     memset(&currentRelativeMouseState, 0, sizeof(currentRelativeMouseState));
     memset(&currentAbsoluteMouseState, 0, sizeof(currentAbsoluteMouseState));
+
+    // Reset unreliable input state
+    cumulativeDeltaX = 0;
+    cumulativeDeltaY = 0;
+    mouseMotionSeq = 0;
+    mouseEpochNumber = 0;
+    memset(gamepadSeq, 0, sizeof(gamepadSeq));
+
     PltCreateMutex(&batchedInputMutex);
 
     return 0;
@@ -325,6 +350,8 @@ static void inputSendThreadProc(void* context) {
     PPACKET_HOLDER holder;
     uint32_t multiControllerMagicLE;
     uint32_t relMouseMagicLE;
+    uint32_t ssRelMouseMagicLE = LE32(SS_MOUSE_MOVE_REL_MAGIC);
+    uint32_t ssMultiControllerMagicLE = LE32(SS_MULTI_CONTROLLER_MAGIC);
 
     if (AppVersionQuad[0] >= 5) {
         multiControllerMagicLE = LE32(MULTI_CONTROLLER_MAGIC_GEN5);
@@ -347,8 +374,14 @@ static void inputSendThreadProc(void* context) {
         // If it's a multi-controller packet, latch it by clearing currentQueuedControllerPacket.
         // This will prevent another thread from batching additional data into it while we're
         // trying to send it.
-        if (holder->packet.header.magic == multiControllerMagicLE) {
-            short controllerNumber = LE16(holder->packet.multiController.controllerNumber);
+        if (holder->packet.header.magic == multiControllerMagicLE ||
+            holder->packet.header.magic == ssMultiControllerMagicLE) {
+            short controllerNumber;
+            if (holder->packet.header.magic == ssMultiControllerMagicLE) {
+                controllerNumber = LE16(holder->packet.ssMultiController.controllerNumber);
+            } else {
+                controllerNumber = LE16(holder->packet.multiController.controllerNumber);
+            }
 
             PltLockMutex(&batchedInputMutex);
 
@@ -430,6 +463,84 @@ static void inputSendThreadProc(void* context) {
 
             // We sent everything we needed in the loop above, so we can just free the
             // holder of the original packet and wait for another input event.
+            freePacketHolder(holder);
+            continue;
+        }
+        // If it's an unreliable cumulative relative mouse move
+        else if (holder->packet.header.magic == ssRelMouseMagicLE) {
+            uint64_t now = PltGetMillis();
+
+            // Delay for batching if required
+            if (now < lastMousePacketTime + MOUSE_BATCHING_INTERVAL_MS) {
+                flushInputOnControlStream();
+                PltSleepMs((int)(lastMousePacketTime + MOUSE_BATCHING_INTERVAL_MS - now));
+                now = PltGetMillis();
+            }
+
+            PltLockMutex(&batchedInputMutex);
+
+            // Accumulate into cumulative tracking and send as single packet
+            if (currentRelativeMouseState.deltaX != 0 || currentRelativeMouseState.deltaY != 0) {
+                short instantDX = (short)CLAMP(currentRelativeMouseState.deltaX, INT16_MIN, INT16_MAX);
+                short instantDY = (short)CLAMP(currentRelativeMouseState.deltaY, INT16_MIN, INT16_MAX);
+
+                cumulativeDeltaX += instantDX;
+                cumulativeDeltaY += instantDY;
+                mouseMotionSeq++;
+
+                // Check for epoch reset (cumulative approaching overflow)
+                if (cumulativeDeltaX > 16000 || cumulativeDeltaX < -16000 ||
+                    cumulativeDeltaY > 16000 || cumulativeDeltaY < -16000) {
+                    // We'll send the current packet first, then reset
+                    // The server will process this packet's cumulative, then get the reset
+                }
+
+                holder->packet.ssMouseMoveRel.sequence = LE16(mouseMotionSeq);
+                holder->packet.ssMouseMoveRel.cumulativeDeltaX = LE16((short)CLAMP(cumulativeDeltaX, INT16_MIN, INT16_MAX));
+                holder->packet.ssMouseMoveRel.cumulativeDeltaY = LE16((short)CLAMP(cumulativeDeltaY, INT16_MIN, INT16_MAX));
+                holder->packet.ssMouseMoveRel.instantDeltaX = LE16(instantDX);
+                holder->packet.ssMouseMoveRel.instantDeltaY = LE16(instantDY);
+
+                currentRelativeMouseState.deltaX -= instantDX;
+                currentRelativeMouseState.deltaY -= instantDY;
+            }
+
+            currentRelativeMouseState.dirty = false;
+            PltUnlockMutex(&batchedInputMutex);
+
+            lastMousePacketTime = now;
+
+            // Send the cumulative packet
+            if (!sendInputPacket(holder, false)) {
+                freePacketHolder(holder);
+                return;
+            }
+
+            // Send epoch reset if needed (cumulative was getting large)
+            if (cumulativeDeltaX > 16000 || cumulativeDeltaX < -16000 ||
+                cumulativeDeltaY > 16000 || cumulativeDeltaY < -16000) {
+                PPACKET_HOLDER resetHolder = allocatePacketHolder(0);
+                if (resetHolder != NULL) {
+                    mouseEpochNumber++;
+                    cumulativeDeltaX = 0;
+                    cumulativeDeltaY = 0;
+                    mouseMotionSeq = 0;
+
+                    resetHolder->channelId = CTRL_CHANNEL_MOUSE;
+                    resetHolder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE; // Epoch reset must be reliable
+                    resetHolder->packet.ssMouseEpochReset.header.size = BE32(sizeof(SS_MOUSE_EPOCH_RESET_PACKET) - sizeof(uint32_t));
+                    resetHolder->packet.ssMouseEpochReset.header.magic = LE32(SS_MOUSE_EPOCH_RESET_MAGIC);
+                    resetHolder->packet.ssMouseEpochReset.newEpoch = LE16(mouseEpochNumber);
+
+                    if (!sendInputPacket(resetHolder, false)) {
+                        freePacketHolder(resetHolder);
+                        freePacketHolder(holder);
+                        return;
+                    }
+                    freePacketHolder(resetHolder);
+                }
+            }
+
             freePacketHolder(holder);
             continue;
         }
@@ -737,16 +848,21 @@ int LiSendMouseMoveEvent(short deltaX, short deltaY) {
 
         holder->channelId = CTRL_CHANNEL_MOUSE;
 
-        // TODO: Send this as unreliable sequenced when we have a delayed reliable retransmission thread
-        // and protocol updates to allow us to determine which unreliable messages were dropped.
-        holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
-
-        holder->packet.mouseMoveRel.header.size = BE32(sizeof(NV_REL_MOUSE_MOVE_PACKET) - sizeof(uint32_t));
-        if (AppVersionQuad[0] >= 5) {
-            holder->packet.mouseMoveRel.header.magic = LE32(MOUSE_MOVE_REL_MAGIC_GEN5);
+        if (unreliableInputEnabled()) {
+            // Unreliable sequenced: cumulative delta encoding
+            holder->enetPacketFlags = 0; // unreliable sequenced
+            holder->packet.ssMouseMoveRel.header.size = BE32(sizeof(SS_REL_MOUSE_MOVE_PACKET) - sizeof(uint32_t));
+            holder->packet.ssMouseMoveRel.header.magic = LE32(SS_MOUSE_MOVE_REL_MAGIC);
         }
         else {
-            holder->packet.mouseMoveRel.header.magic = LE32(MOUSE_MOVE_REL_MAGIC);
+            holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+            holder->packet.mouseMoveRel.header.size = BE32(sizeof(NV_REL_MOUSE_MOVE_PACKET) - sizeof(uint32_t));
+            if (AppVersionQuad[0] >= 5) {
+                holder->packet.mouseMoveRel.header.magic = LE32(MOUSE_MOVE_REL_MAGIC_GEN5);
+            }
+            else {
+                holder->packet.mouseMoveRel.header.magic = LE32(MOUSE_MOVE_REL_MAGIC);
+            }
         }
 
         // Remaining fields are set in the input thread based on the latest currentRelativeMouseState values
@@ -802,8 +918,8 @@ int LiSendMousePositionEvent(short x, short y, short referenceWidth, short refer
 
         holder->channelId = CTRL_CHANNEL_MOUSE;
 
-        // TODO: Send this as unreliable sequenced when we have a delayed reliable retransmission thread
-        holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+        // Absolute mouse: unreliable when supported (latest position wins, no deltas to lose)
+        holder->enetPacketFlags = unreliableInputEnabled() ? 0 : ENET_PACKET_FLAG_RELIABLE;
 
         holder->packet.mouseMoveAbs.header.size = BE32(sizeof(NV_ABS_MOUSE_MOVE_PACKET) - sizeof(uint32_t));
         holder->packet.mouseMoveAbs.header.magic = LE32(MOUSE_MOVE_ABS_MAGIC);
@@ -1049,9 +1165,16 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         // We do not support batching with the legacy controller packet format
         LC_ASSERT(AppVersionQuad[0] > 3);
 
+        // For SS unreliable packets, check buttonFlags in the SS struct
+        if (unreliableInputEnabled()) {
+            if (holder->packet.ssMultiController.buttonFlags != LE16((short)buttonFlags) ||
+                holder->packet.ssMultiController.buttonFlags2 != LE16((short)(buttonFlags >> 16))) {
+                holder = NULL;
+            }
+        }
         // If this new packet has different button flags, end the batch to ensure the
         // host receives the exact axis values present at the time of the button press.
-        if (holder->packet.multiController.buttonFlags != LE16((short)buttonFlags) ||
+        else if (holder->packet.multiController.buttonFlags != LE16((short)buttonFlags) ||
             holder->packet.multiController.buttonFlags2 != (IS_SUNSHINE() ? LE16((short)(buttonFlags >> 16)) : 0)) {
             // Pretend there wasn't a currently queued controller packet
             holder = NULL;
@@ -1072,8 +1195,15 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         // Send each controller on a separate channel
         holder->channelId = CTRL_CHANNEL_GAMEPAD_BASE + controllerNumber;
 
-        // TODO: Send this as unreliable sequenced when we have a delayed reliable retransmission thread
-        holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+        if (unreliableInputEnabled()) {
+            // Unreliable sequenced for axis data; button changes still get through
+            // because we break the batch on button change (above), ensuring the packet
+            // with the new button state is always sent.
+            holder->enetPacketFlags = 0; // unreliable sequenced
+        }
+        else {
+            holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+        }
 
         // Remember that we need to enqueue this holder since it's new
         enqueueHolder = true;
@@ -1084,7 +1214,29 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         PltLockMutex(&batchedInputMutex);
     }
 
-    if (AppVersionQuad[0] == 3) {
+    if (unreliableInputEnabled()) {
+        // Sunshine unreliable sequenced controller packet — no padding fields
+        gamepadSeq[controllerNumber]++;
+
+        holder->packet.ssMultiController.header.size = BE32(sizeof(SS_MULTI_CONTROLLER_PACKET) - sizeof(uint32_t));
+        holder->packet.ssMultiController.header.magic = LE32(SS_MULTI_CONTROLLER_MAGIC);
+        holder->packet.ssMultiController.sequence = LE16(gamepadSeq[controllerNumber]);
+        holder->packet.ssMultiController.controllerNumber = LE16(controllerNumber);
+        holder->packet.ssMultiController.activeGamepadMask = LE16(activeGamepadMask);
+        holder->packet.ssMultiController.buttonFlags = LE16((short)buttonFlags);
+        holder->packet.ssMultiController.leftTrigger = leftTrigger;
+        holder->packet.ssMultiController.rightTrigger = rightTrigger;
+        holder->packet.ssMultiController.leftStickX = LE16(leftStickX);
+        holder->packet.ssMultiController.leftStickY = LE16(leftStickY);
+        holder->packet.ssMultiController.rightStickX = LE16(rightStickX);
+        holder->packet.ssMultiController.rightStickY = LE16(rightStickY);
+        holder->packet.ssMultiController.buttonFlags2 = LE16((short)(buttonFlags >> 16));
+
+        if (enqueueHolder) {
+            currentQueuedControllerPacket[controllerNumber] = holder;
+        }
+    }
+    else if (AppVersionQuad[0] == 3) {
         // Generation 3 servers don't support multiple controllers so we send
         // the legacy packet
         holder->packet.controller.header.size = BE32(sizeof(NV_CONTROLLER_PACKET) - sizeof(uint32_t));

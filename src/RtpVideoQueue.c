@@ -702,12 +702,15 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
 
         queue->bufferFirstRecvTimeUs = PltGetMicroseconds();
         queue->bufferFirstRecvPtsUs  = ((uint64_t)packet->timestamp * 1000) / PTS_DIVISOR;
+        queue->bufferLastRecvTimeUs = 0;
         queue->bufferLowestSequenceNumber = U16(packet->sequenceNumber - fecIndex);
         queue->nextContiguousSequenceNumber = queue->bufferLowestSequenceNumber;
         queue->receivedDataPackets = 0;
         queue->receivedParityPackets = 0;
         queue->receivedHighestSequenceNumber = 0;
         queue->missingPackets = 0;
+        queue->lossBitmap = 0;
+        queue->lossBitmapLastSeq = 0;
         queue->useFastQueuePath = true;
         queue->reportedLostFrame = false;
         queue->bufferDataPackets = (nvPacket->fecInfo & 0xFFC00000) >> 22;
@@ -771,6 +774,35 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
         if (isBefore16(packet->sequenceNumber, queue->bufferFirstParitySequenceNumber)) {
             queue->receivedDataPackets++;
             LC_ASSERT(queue->receivedDataPackets <= queue->bufferDataPackets);
+
+            // Stamp last data packet arrival time
+            queue->bufferLastRecvTimeUs = PltGetMicroseconds();
+
+            // Update rolling 64-bit loss bitmap (data packets only)
+            {
+                uint16_t seq = packet->sequenceNumber;
+                if (queue->lossBitmap == 0 && queue->lossBitmapLastSeq == 0) {
+                    // First packet ever — initialize
+                    queue->lossBitmap = 1;
+                    queue->lossBitmapLastSeq = seq;
+                }
+                else {
+                    uint16_t gap = U16(seq - queue->lossBitmapLastSeq);
+                    if (gap == 0) {
+                        // Duplicate — no-op
+                    }
+                    else if (gap <= 64) {
+                        queue->lossBitmap <<= gap;
+                        queue->lossBitmap |= 1;
+                        queue->lossBitmapLastSeq = seq;
+                    }
+                    else {
+                        // Gap too large or backward wrap — reset
+                        queue->lossBitmap = 1;
+                        queue->lossBitmapLastSeq = seq;
+                    }
+                }
+            }
         }
         else {
             queue->receivedParityPackets++;
@@ -804,7 +836,9 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
                         queue->receivedDataPackets,
                         queue->bufferDataPackets,
                         fecRecovered,
-                        0 // fecFailure = 0 since frame was successfully reconstructed
+                        0, // fecFailure = 0 since frame was successfully reconstructed
+                        queue->bufferLastRecvTimeUs,
+                        queue->lossBitmap
                     );
                 }
 

@@ -195,4 +195,39 @@ typedef struct _SS_CONTROLLER_BATTERY_PACKET {
     uint8_t zero[1]; // Alignment/reserved
 } SS_CONTROLLER_BATTERY_PACKET, *PSS_CONTROLLER_BATTERY_PACKET;
 
+// Unreliable input: cumulative relative mouse move with sequence tracking
+#define SS_MOUSE_MOVE_REL_MAGIC 0x55000010
+typedef struct _SS_REL_MOUSE_MOVE_PACKET {
+    NV_INPUT_HEADER header;
+    uint16_t sequence;          // Monotonic per epoch, wraps at UINT16_MAX
+    int16_t  cumulativeDeltaX;  // Cumulative since epoch start
+    int16_t  cumulativeDeltaY;  // Cumulative since epoch start
+    int16_t  instantDeltaX;     // This packet's delta (fallback for non-cumulative servers)
+    int16_t  instantDeltaY;     // This packet's delta (fallback for non-cumulative servers)
+} SS_REL_MOUSE_MOVE_PACKET, *PSS_REL_MOUSE_MOVE_PACKET;
+
+// Unreliable input: epoch reset for cumulative mouse tracking
+#define SS_MOUSE_EPOCH_RESET_MAGIC 0x55000011
+typedef struct _SS_MOUSE_EPOCH_RESET_PACKET {
+    NV_INPUT_HEADER header;
+    uint16_t newEpoch;          // Epoch number (increments on each reset)
+} SS_MOUSE_EPOCH_RESET_PACKET, *PSS_MOUSE_EPOCH_RESET_PACKET;
+
+// Unreliable input: sequenced gamepad state (full state, latest-wins)
+#define SS_MULTI_CONTROLLER_MAGIC 0x55000012
+typedef struct _SS_MULTI_CONTROLLER_PACKET {
+    NV_INPUT_HEADER header;
+    uint16_t sequence;           // Monotonic per controller
+    short controllerNumber;
+    short activeGamepadMask;
+    short buttonFlags;
+    unsigned char leftTrigger;
+    unsigned char rightTrigger;
+    short leftStickX;
+    short leftStickY;
+    short rightStickX;
+    short rightStickY;
+    short buttonFlags2;          // Extended button flags
+} SS_MULTI_CONTROLLER_PACKET, *PSS_MULTI_CONTROLLER_PACKET;
+
 #pragma pack(pop)

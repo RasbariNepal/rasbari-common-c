@@ -197,6 +197,10 @@ typedef struct _DECODE_UNIT {
     uint16_t packetsExpected;       // total data packets expected
     uint16_t packetsFecRecovered;   // data packets recovered via FEC
     uint8_t  fecFailure;            // 1 if FEC couldn't recover all lost packets
+
+    // ABR extension metadata (bridged from RTP video queue)
+    uint64_t lastRecvTimeUs;        // Last data packet arrival time for this frame
+    uint64_t lossBitmap;            // Rolling 64-bit loss bitmap snapshot
 } DECODE_UNIT, *PDECODE_UNIT;
 
 // Specifies that the audio stream should be encoded in stereo (default)
@@ -489,6 +493,9 @@ typedef void(*ConnListenerSetAdaptiveTriggers)(uint16_t controllerNumber, uint8_
 // This callback is invoked to set a controller's RGB LED (if present).
 typedef void(*ConnListenerSetControllerLED)(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b);
 
+// This callback is invoked when the server sends clipboard data to the client.
+typedef void(*ConnListenerClipboardData)(const char* text, uint32_t length);
+
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
     ConnListenerStageComplete stageComplete;
@@ -503,6 +510,7 @@ typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerSetMotionEventState setMotionEventState;
     ConnListenerSetControllerLED setControllerLED;
     ConnListenerSetAdaptiveTriggers setAdaptiveTriggers;
+    ConnListenerClipboardData clipboardData;
 } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
 
 // Use this function to zero the connection callbacks when allocated on the stack or heap
@@ -1015,10 +1023,15 @@ void LiRequestIdrFrame(void);
 // This function returns any extended feature flags supported by the host.
 #define LI_FF_PEN_TOUCH_EVENTS        0x01 // LiSendTouchEvent()/LiSendPenEvent() supported
 #define LI_FF_CONTROLLER_TOUCH_EVENTS 0x02 // LiSendControllerTouchEvent() supported
+#define SS_FF_CLIPBOARD               0x08 // Server supports bidirectional clipboard sharing
 uint32_t LiGetHostFeatureFlags(void);
 
 // Returns true if connected to a Sunshine server.
 bool LiIsSunshine(void);
+
+// Returns the server-configured ABR feedback interval (frames per feedback).
+// Defaults to 3 if the server doesn't provide one.
+uint32_t LiGetAbrFeedbackInterval(void);
 
 // Send extended IDX_LOSS_STATS with ABR data appended after the legacy 32-byte payload.
 // payload must contain the full packet (32 legacy + ABR extension).
@@ -1027,6 +1040,10 @@ int LiSendLossStatsWithAbr(const void* payload, int length);
 // Send a telemetry batch packet (SS_CLIENT_TELEMETRY_PTYPE).
 // payload contains batch header + wire records.
 int LiSendTelemetryBatch(const void* payload, int length);
+
+// Send clipboard data to the server (SS_CLIPBOARD_PTYPE).
+// format 0 = UTF-8 text. Returns 0 on success, -1 on failure.
+int LiSendClipboardData(uint32_t sequence, uint16_t format, const char* text, uint32_t length);
 
 // Returns the RTSP session ID string for session correlation.
 const char* LiGetSessionId(void);

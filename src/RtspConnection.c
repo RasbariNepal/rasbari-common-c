@@ -1120,6 +1120,12 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             SunshineFeatureFlags = 0;
         }
 
+        // Look for the Sunshine ABR feedback interval in the SDP attributes
+        if (!parseSdpAttributeToUInt(response.payload, "x-ss-general.abrFeedbackInterval", &AbrFeedbackInterval) ||
+            AbrFeedbackInterval == 0) {
+            AbrFeedbackInterval = 3;
+        }
+
         // Look for the Sunshine encryption flags in the SDP attributes
         if (!parseSdpAttributeToUInt(response.payload, "x-ss-general.encryptionSupported", &EncryptionFeaturesSupported)) {
             EncryptionFeaturesSupported = 0;

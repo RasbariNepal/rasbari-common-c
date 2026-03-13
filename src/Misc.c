@@ -159,3 +159,7 @@ uint32_t LiGetHostFeatureFlags(void) {
 bool LiIsSunshine(void) {
     return IS_SUNSHINE();
 }
+
+uint32_t LiGetAbrFeedbackInterval(void) {
+    return AbrFeedbackInterval;
+}

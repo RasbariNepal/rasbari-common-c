@@ -1309,6 +1309,20 @@ static void controlReceiveThreadFunc(void* context) {
             if (needsAsyncCallback(ctlHdr->type)) {
                 queueAsyncCallback(ctlHdr, packetLength);
             }
+            else if (IS_SUNSHINE() && ctlHdr->type == SS_CLIPBOARD_PTYPE) {
+                // Clipboard packet: sequence(4 LE) + format(2 LE) + text[]
+                int minPayload = (int)(sizeof(*ctlHdr) + 4 + 2);
+                if (packetLength >= minPayload) {
+                    char* payload = (char*)(ctlHdr + 1);
+                    uint16_t format = LE16(*(uint16_t*)(payload + 4));
+                    uint32_t textLen = packetLength - minPayload;
+
+                    if (format == 0 && textLen > 0 && textLen <= 65536) {
+                        ListenerCallbacks.clipboardData(payload + 6, textLen);
+                    }
+                }
+                free(ctlHdr);
+            }
             else if (ctlHdr->type == packetTypes[IDX_TERMINATION]) {
                 BYTE_BUFFER bb;
 
@@ -1645,6 +1659,90 @@ int LiSendTelemetryBatch(const void* payload, int length) {
         // since it allocates the ENet packet dynamically
         return sendMessageEnet(SS_CLIENT_TELEMETRY_PTYPE, (short)length, payload,
                                CTRL_CHANNEL_GENERIC, ENET_PACKET_FLAG_UNSEQUENCED, false) ? 0 : -1;
+    }
+}
+
+// Send clipboard data to the server. Reliable delivery on CTRL_CHANNEL_GENERIC.
+int LiSendClipboardData(uint32_t sequence, uint16_t format, const char* text, uint32_t length) {
+    if (peer == NULL) {
+        return -1;
+    }
+
+    // Wire payload: sequence(4 LE) + format(2 LE) + text
+    int payloadLen = 4 + 2 + length;
+
+    if (encryptedControlStream) {
+        ENetPacket* enetPacket;
+        PNVCTL_ENCRYPTED_PACKET_HEADER encPacket;
+        PNVCTL_ENET_PACKET_HEADER_V2 packet;
+        char* plaintext;
+
+        plaintext = (char*)malloc(sizeof(*packet) + payloadLen);
+        if (plaintext == NULL) {
+            return -1;
+        }
+
+        enetPacket = enet_packet_create(NULL,
+                                        sizeof(*encPacket) + AES_GCM_TAG_LENGTH + sizeof(*packet) + payloadLen,
+                                        ENET_PACKET_FLAG_RELIABLE);
+        if (enetPacket == NULL) {
+            free(plaintext);
+            return -1;
+        }
+
+        PltLockMutex(&enetMutex);
+
+        encPacket = (PNVCTL_ENCRYPTED_PACKET_HEADER)enetPacket->data;
+        encPacket->encryptedHeaderType = 0x0001;
+        encPacket->length = sizeof(encPacket->seq) + AES_GCM_TAG_LENGTH + sizeof(*packet) + payloadLen;
+        encPacket->seq = currentEnetSequenceNumber++;
+
+        packet = (PNVCTL_ENET_PACKET_HEADER_V2)plaintext;
+        packet->type = SS_CLIPBOARD_PTYPE;
+        packet->payloadLength = (short)payloadLen;
+
+        // Build payload: LE32(sequence) + LE16(format) + text
+        char* p = (char*)&packet[1];
+        *(uint32_t*)p = LE32(sequence); p += 4;
+        *(uint16_t*)p = LE16(format); p += 2;
+        memcpy(p, text, length);
+
+        if (!encryptControlMessage(encPacket, packet)) {
+            Limelog("Failed to encrypt clipboard data\n");
+            enet_packet_destroy(enetPacket);
+            PltUnlockMutex(&enetMutex);
+            free(plaintext);
+            return -1;
+        }
+
+        if (enet_peer_send(peer, CTRL_CHANNEL_GENERIC, enetPacket) < 0) {
+            enet_packet_destroy(enetPacket);
+            PltUnlockMutex(&enetMutex);
+            free(plaintext);
+            return -1;
+        }
+
+        enet_host_service(client, NULL, 0);
+        PltUnlockMutex(&enetMutex);
+        free(plaintext);
+        return 0;
+    }
+    else {
+        // Build a temporary payload buffer
+        char* payload = (char*)malloc(payloadLen);
+        if (payload == NULL) {
+            return -1;
+        }
+
+        char* p = payload;
+        *(uint32_t*)p = LE32(sequence); p += 4;
+        *(uint16_t*)p = LE16(format); p += 2;
+        memcpy(p, text, length);
+
+        int ret = sendMessageEnet(SS_CLIPBOARD_PTYPE, (short)payloadLen, payload,
+                                  CTRL_CHANNEL_GENERIC, ENET_PACKET_FLAG_RELIABLE, false) ? 0 : -1;
+        free(payload);
+        return ret;
     }
 }
 

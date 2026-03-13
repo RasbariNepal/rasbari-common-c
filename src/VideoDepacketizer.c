@@ -30,6 +30,8 @@ static uint16_t pendingFecReceived;
 static uint16_t pendingFecExpected;
 static uint16_t pendingFecRecovered;
 static uint8_t  pendingFecFailure;
+static uint64_t pendingLastRecvTimeUs;
+static uint64_t pendingLossBitmap;
 
 #define DR_CLEANUP -1000
 
@@ -91,11 +93,14 @@ void initializeVideoDepacketizer(int pktSize) {
 }
 
 // Called by RtpVideoQueue.c before submitCompletedFrame() to bridge FEC metadata
-void setFrameFecMetadata(uint16_t received, uint16_t expected, uint16_t fecRecovered, uint8_t fecFailure) {
+void setFrameFecMetadata(uint16_t received, uint16_t expected, uint16_t fecRecovered, uint8_t fecFailure,
+                         uint64_t lastRecvTimeUs, uint64_t lossBitmap) {
     pendingFecReceived = received;
     pendingFecExpected = expected;
     pendingFecRecovered = fecRecovered;
     pendingFecFailure = fecFailure;
+    pendingLastRecvTimeUs = lastRecvTimeUs;
+    pendingLossBitmap = lossBitmap;
 }
 
 // Free the NAL chain
@@ -520,6 +525,8 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
             qdu->decodeUnit.packetsExpected = pendingFecExpected;
             qdu->decodeUnit.packetsFecRecovered = pendingFecRecovered;
             qdu->decodeUnit.fecFailure = pendingFecFailure;
+            qdu->decodeUnit.lastRecvTimeUs = pendingLastRecvTimeUs;
+            qdu->decodeUnit.lossBitmap = pendingLossBitmap;
 
             // Invoke the key frame callback if needed
             if (nalChainHead->bufferType != BUFFER_TYPE_PICDATA || qdu->decodeUnit.frameType == FRAME_TYPE_IDR) {
