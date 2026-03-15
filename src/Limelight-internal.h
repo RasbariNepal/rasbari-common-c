@@ -148,7 +148,7 @@ void setFrameFecMetadata(uint16_t received, uint16_t expected, uint16_t fecRecov
                          uint64_t lastRecvTimeUs, uint64_t lossBitmap);
 void stopVideoDepacketizer(void);
 void requestDecoderRefresh(void);
-void notifyFrameLost(unsigned int frameNumber, bool speculative);
+void notifyFrameLost(unsigned int frameNumber, bool speculative, uint8_t dropReason);
 
 void initializeVideoStream(void);
 void destroyVideoStream(void);

@@ -33,6 +33,9 @@ static uint8_t  pendingFecFailure;
 static uint64_t pendingLastRecvTimeUs;
 static uint64_t pendingLossBitmap;
 
+// Drop reason bridge — set before dropFrameState() or by notifyFrameLost()
+static uint8_t pendingDropReason;
+
 #define DR_CLEANUP -1000
 
 #define CONSECUTIVE_DROP_LIMIT 120
@@ -528,6 +531,10 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
             qdu->decodeUnit.lastRecvTimeUs = pendingLastRecvTimeUs;
             qdu->decodeUnit.lossBitmap = pendingLossBitmap;
 
+            // Copy and reset pending drop reason
+            qdu->decodeUnit.precedingDropReason = pendingDropReason;
+            pendingDropReason = FRAME_DROP_NONE;
+
             // Invoke the key frame callback if needed
             if (nalChainHead->bufferType != BUFFER_TYPE_PICDATA || qdu->decodeUnit.frameType == FRAME_TYPE_IDR) {
                 qdu->decodeUnit.frameType = FRAME_TYPE_IDR;
@@ -550,6 +557,7 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
                     // Clear NAL state for the frame that we failed to enqueue
                     nalChainHead = qdu->decodeUnit.bufferList;
                     nalChainDataLength = qdu->decodeUnit.fullLength;
+                    pendingDropReason = FRAME_DROP_PIPELINE;
                     dropFrameState();
 
                     // Free the DU we were going to queue
@@ -818,6 +826,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
         Limelog("Depacketizer detected corrupt frame: %d", frameIndex);
         decodingFrame = false;
         nextFrameNumber = frameIndex + 1;
+        pendingDropReason = FRAME_DROP_PIPELINE;
         dropFrameState();
         if (waitingForIdrFrame) {
             LiRequestIdrFrame();
@@ -850,6 +859,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
 
             // Wait until next complete frame
             waitingForNextSuccessfulFrame = true;
+            pendingDropReason = FRAME_DROP_LATE;
             dropFrameState();
         }
         else {
@@ -1083,6 +1093,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
                 // Skip to the next frame and tell the host we lost this one
                 decodingFrame = false;
                 nextFrameNumber = frameIndex + 1;
+                pendingDropReason = FRAME_DROP_PIPELINE;
                 dropFrameState();
                 if (waitingForIdrFrame) {
                     LiRequestIdrFrame();
@@ -1126,6 +1137,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             }
 
             waitingForNextSuccessfulFrame = false;
+            pendingDropReason = FRAME_DROP_PIPELINE;
             dropFrameState();
             return;
         }
@@ -1147,6 +1159,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
                 dropStatePending = false;
             }
             else {
+                pendingDropReason = FRAME_DROP_PIPELINE;
                 dropFrameState();
                 return;
             }
@@ -1160,7 +1173,8 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
 // if it determines the frame to be unrecoverable. This lets us
 // avoid having to wait until the next received frame to determine
 // that we lost a frame and submit an RFI request.
-void notifyFrameLost(unsigned int frameNumber, bool speculative) {
+void notifyFrameLost(unsigned int frameNumber, bool speculative, uint8_t dropReason) {
+    pendingDropReason = dropReason;
     // We may not invalidate frames that we've already received
     LC_ASSERT(frameNumber >= startFrameNumber);
 

@@ -147,6 +147,12 @@ typedef struct _LENTRY {
 #define FRAME_TYPE_IDR    0x01
 
 // A decode unit describes a buffer chain of video data from multiple packets
+// Drop reason codes for telemetry — why a frame was lost or discarded
+#define FRAME_DROP_NONE              0  // Rendered successfully
+#define FRAME_DROP_FEC_UNRECOVERABLE 1  // Packet loss, FEC couldn't recover
+#define FRAME_DROP_LATE              2  // Packets never arrived or arrived too late
+#define FRAME_DROP_PIPELINE          3  // Decoded but dropped by pacer, decode failure, queue overflow
+
 typedef struct _DECODE_UNIT {
     // Frame number
     int frameNumber;
@@ -207,6 +213,10 @@ typedef struct _DECODE_UNIT {
     // ABR extension metadata (bridged from RTP video queue)
     uint64_t lastRecvTimeUs;        // Last data packet arrival time for this frame
     uint64_t lossBitmap;            // Rolling 64-bit loss bitmap snapshot
+
+    // Drop reason for the frame(s) preceding this one that were lost.
+    // FRAME_DROP_NONE if no frames were lost. Set by RtpVideoQueue/VideoDepacketizer.
+    uint8_t precedingDropReason;
 } DECODE_UNIT, *PDECODE_UNIT;
 
 // Specifies that the audio stream should be encoded in stereo (default)
